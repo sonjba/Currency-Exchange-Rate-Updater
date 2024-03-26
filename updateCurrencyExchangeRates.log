@@ -1,55 +1,69 @@
 public class CurrencyExchangeRateUpdater {    
     
-    // Method to update currency rates for a specified object
+    /**
+     * Updates the currency rates for the specified object.
+     * 
+     * objName The name of the object for which currency rates should be updated.
+     *         This parameter should be either 'DatedConversionRate' or 'CurrencyType'.
+     *         The method will retrieve currency records from the specified object
+     *         and update their conversion rates based on external API data.
+     */
     public static void updateCurrencyRates(String objName) {
-        // Map to store currency ISO codes and their corresponding Salesforce record IDs
+        // Initialize a map to store currency ISO codes and their corresponding Salesforce record IDs
         Map<String, String> currencyCodes = new Map<String, String>();
         
-        // Query to retrieve currency records from the specified object
+        // Construct a dynamic SOQL query to retrieve currency records from the specified object
         String query = 'SELECT Id, IsoCode FROM ' + objName;
-        // Execute the query and store the results in a list
+        // Execute the SOQL query and store the results in a list
         List<SObject> records = Database.query(query);
         
-        // Populate the currencyCodes map with ISO codes and record IDs
+        // Iterate over the retrieved records and populate the currencyCodes map
         for (SObject record : records) {
             currencyCodes.put(String.valueOf(record.get('IsoCode')), String.valueOf(record.get('Id')));
         }
         
-        // Endpoint URL for the external API
+        // Collect exchange rates for the retrieved currency ISO codes from an external API
+        Map<String, String> exchangeRates = collectExchangeRates(currencyCodes.keySet());
+
+        // Iterate over the collected exchange rates and update the corresponding currency records
+        for (String currencyIsoCode : exchangeRates.keySet()) {
+            updateCurrencyType(currencyCodes.get(currencyIsoCode), currencyIsoCode, objName, exchangeRates.get(currencyIsoCode));
+        }
+    }
+    
+    /**
+     * Fetches the exchange rate for the specified currency ISO code from an external API.
+     * 
+     * currencyIsoCode The ISO code of the currency for which the exchange rate is to be fetched.
+     * The exchange rate as a String, or null if it cannot be fetched.
+     */
+    private static String getExchangeRateFromExternalAPI(String currencyIsoCode) {
+        // Define the endpoint URL for the external API
         String ep = 'https://open.er-api.com/v6/latest/GBP';
+        // Create an HTTP instance
         Http http = new Http();
+        // Create an HTTP request
         HttpRequest request = new HttpRequest();
         request.setEndpoint(ep);
         request.setMethod('GET');
 
         try {
-            // Send HTTP request to the external API and capture the response
+            // Send the HTTP request and capture the response
             HttpResponse response = http.send(request);
             // Check if the response is successful (status code 200)
             if (response.getStatusCode() == 200) {
+                // Extract the response body
                 String body = response.getBody();
-                // Deserialize JSON response into a map
+                // Deserialize the JSON response into a Map
                 Map<String, Object> jsonResponse = (Map<String, Object>) JSON.deserializeUntyped(body);
                 // Check if the response contains exchange rates
                 if (jsonResponse.containsKey('rates')) {
+                    // Extract the rates map from the JSON response
                     Map<String, Object> rates = (Map<String, Object>) jsonResponse.get('rates');
-                    List<SObject> recordsToUpdate = new List<SObject>();
-                    // Loop through exchange rates and prepare records to update
-                    for (String currencyIsoCode : rates.keySet()) {
-                        String conversionRate = String.valueOf(rates.get(currencyIsoCode));
-                        if (currencyCodes.containsKey(currencyIsoCode)) {
-                            String currencyId = currencyCodes.get(currencyIsoCode);
-                            // Construct the currency record with the updated conversion rate
-                            SObject currencyRecord = Schema.getGlobalDescribe().get(objName).newSObject();
-                            currencyRecord.put('Id', currencyId);
-                            currencyRecord.put('ConversionRate', conversionRate);
-                            recordsToUpdate.add(currencyRecord);
-                        }
-                    }
-                    // Update all currency records outside of the loop
-                    if (!recordsToUpdate.isEmpty()) {
-                        updateCurrencyType(recordsToUpdate);
-                        System.debug('Updated ' + recordsToUpdate.size() + ' currency records.');
+                    // Check if the rates map contains the exchange rate for the specified currency ISO code
+                    if (rates.containsKey(currencyIsoCode)) {
+                        // Return the exchange rate as a String
+                        return String.valueOf(rates.get(currencyIsoCode));
                     }
                 }
             }
@@ -57,43 +71,73 @@ public class CurrencyExchangeRateUpdater {
             // Log any exceptions that occur during the process
             System.debug('Exception occurred: ' + e.getMessage());
         }
+        
+        // Return null if the exchange rate cannot be fetched
+        return null;
     }
 
-    // Method to perform POST requests to update currency records
-    private static void updateCurrencyType(List<SObject> recordsToUpdate) {
-        // List to store HTTP requests for batch processing
-        List<HttpRequest> requests = new List<HttpRequest>();
-        
-        // Iterate over records to update and create HTTP requests
-        for (SObject record : recordsToUpdate) {
-            String objName = record.getSObjectType().getDescribe().getName();
-            String currencyId = (String) record.get('Id');
-            String conversionRate = (String) record.get('ConversionRate');
-            
+    /**
+     * Updates the conversion rate for a currency record in Salesforce.
+     * 
+     * currencyId The Salesforce record ID of the currency record to be updated.
+     * currencyIsoCode The ISO code of the currency to be updated.
+     * objName The name of the object containing the currency records.
+     * conversionRate The new conversion rate to be set for the currency.
+     */
+    private static void updateCurrencyType(String currencyId, String currencyIsoCode, String objName, String conversionRate) {
+        // Check if the currency ISO code and conversion rate are not blank
+        if (String.isNotBlank(currencyIsoCode) && String.isNotBlank(conversionRate)) {
+            // Create an HTTP instance
+            Http h = new Http();
+            // Create an HTTP request
+            HttpRequest req = new HttpRequest();
             // Construct the endpoint URL for updating the currency record
             String url = 'https://globant-6a1-dev-ed.develop.my.salesforce.com/services/data/v28.0/sobjects/' + objName + '/' + currencyId + '?_HttpMethod=PATCH';
-            HttpRequest req = new HttpRequest();
             req.setEndpoint(url);
+            // Set the request body with the new conversion rate
             req.setBody('{ "ConversionRate" : ' + conversionRate + ' }');
+            // Set the authorization header using the current user's session ID
             req.setHeader('Authorization', 'OAuth ' + UserInfo.getSessionId());
+            // Set the content type header
             req.setHeader('Content-Type', 'application/json');
+            // Set the HTTP method to POST (used for PATCH request)
             req.setMethod('POST');
-            
-            // Add the request to the list
-            requests.add(req);
-        }
-        
-        // Send batch HTTP requests
-        Http http = new Http();
-        HTTPResponse[] responses = http.send(requests);
-        
-        // Process the responses
-        for (HttpResponse res : responses) {
+            // Send the HTTP request and capture the response
+            HttpResponse res = h.send(req);
+
+            // Check the response status code and output debug messages accordingly
             if (res.getStatusCode() == 201) {
-                System.debug('Currency record updated successfully');
+                System.debug(objName + ' ' + currencyIsoCode + ' updated with rate: ' + conversionRate);
+            } else if (res.getStatusCode() == 200) {
+                System.debug('Updated ' + objName + ' ' + currencyIsoCode + ': ' + res.getBody());
             } else {
-                System.debug('Failed to update currency record: ' + res.getBody());
+                System.debug('Updated ' + objName + ' ' + currencyIsoCode + ': ' + res.getBody());
             }
         }
+    }
+    
+    /**
+     * Collects exchange rates for the specified currency ISO codes from an external source.
+     * 
+     * currencyIsoCodes A set of currency ISO codes for which exchange rates are to be collected.
+     * A map containing currency ISO codes as keys and their corresponding exchange rates as values.
+     */
+    private static Map<String, String> collectExchangeRates(Set<String> currencyIsoCodes) {
+        // Initialize a map to store currency ISO codes and their corresponding exchange rates
+        Map<String, String> exchangeRates = new Map<String, String>();
+        
+        // Iterate over the provided currency ISO codes
+        for (String currencyIsoCode : currencyIsoCodes) {
+            // Fetch the exchange rate for each currency ISO code from an external API
+            String conversionRate = getExchangeRateFromExternalAPI(currencyIsoCode);
+            // Check if the conversion rate is not null
+            if (conversionRate != null) {
+                // Add the currency ISO code and exchange rate to the exchangeRates map
+                exchangeRates.put(currencyIsoCode, conversionRate);
+            }
+        }
+        
+        // Return the map containing currency ISO codes and exchange rates
+        return exchangeRates;
     }
 }
