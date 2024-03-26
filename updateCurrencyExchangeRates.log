@@ -1,0 +1,99 @@
+public class CurrencyExchangeRateUpdater {    
+    
+    // Method to update currency rates for a specified object
+    public static void updateCurrencyRates(String objName) {
+        // Map to store currency ISO codes and their corresponding Salesforce record IDs
+        Map<String, String> currencyCodes = new Map<String, String>();
+        
+        // Query to retrieve currency records from the specified object
+        String query = 'SELECT Id, IsoCode FROM ' + objName;
+        // Execute the query and store the results in a list
+        List<SObject> records = Database.query(query);
+        
+        // Populate the currencyCodes map with ISO codes and record IDs
+        for (SObject record : records) {
+            currencyCodes.put(String.valueOf(record.get('IsoCode')), String.valueOf(record.get('Id')));
+        }
+        
+        // Endpoint URL for the external API
+        String ep = 'https://open.er-api.com/v6/latest/GBP';
+        Http http = new Http();
+        HttpRequest request = new HttpRequest();
+        request.setEndpoint(ep);
+        request.setMethod('GET');
+
+        try {
+            // Send HTTP request to the external API and capture the response
+            HttpResponse response = http.send(request);
+            // Check if the response is successful (status code 200)
+            if (response.getStatusCode() == 200) {
+                String body = response.getBody();
+                // Deserialize JSON response into a map
+                Map<String, Object> jsonResponse = (Map<String, Object>) JSON.deserializeUntyped(body);
+                // Check if the response contains exchange rates
+                if (jsonResponse.containsKey('rates')) {
+                    Map<String, Object> rates = (Map<String, Object>) jsonResponse.get('rates');
+                    List<SObject> recordsToUpdate = new List<SObject>();
+                    // Loop through exchange rates and prepare records to update
+                    for (String currencyIsoCode : rates.keySet()) {
+                        String conversionRate = String.valueOf(rates.get(currencyIsoCode));
+                        if (currencyCodes.containsKey(currencyIsoCode)) {
+                            String currencyId = currencyCodes.get(currencyIsoCode);
+                            // Construct the currency record with the updated conversion rate
+                            SObject currencyRecord = Schema.getGlobalDescribe().get(objName).newSObject();
+                            currencyRecord.put('Id', currencyId);
+                            currencyRecord.put('ConversionRate', conversionRate);
+                            recordsToUpdate.add(currencyRecord);
+                        }
+                    }
+                    // Update all currency records outside of the loop
+                    if (!recordsToUpdate.isEmpty()) {
+                        updateCurrencyType(recordsToUpdate);
+                        System.debug('Updated ' + recordsToUpdate.size() + ' currency records.');
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Log any exceptions that occur during the process
+            System.debug('Exception occurred: ' + e.getMessage());
+        }
+    }
+
+    // Method to perform POST requests to update currency records
+    private static void updateCurrencyType(List<SObject> recordsToUpdate) {
+        // List to store HTTP requests for batch processing
+        List<HttpRequest> requests = new List<HttpRequest>();
+        
+        // Iterate over records to update and create HTTP requests
+        for (SObject record : recordsToUpdate) {
+            String objName = record.getSObjectType().getDescribe().getName();
+            String currencyId = (String) record.get('Id');
+            String conversionRate = (String) record.get('ConversionRate');
+            
+            // Construct the endpoint URL for updating the currency record
+            String url = 'https://globant-6a1-dev-ed.develop.my.salesforce.com/services/data/v28.0/sobjects/' + objName + '/' + currencyId + '?_HttpMethod=PATCH';
+            HttpRequest req = new HttpRequest();
+            req.setEndpoint(url);
+            req.setBody('{ "ConversionRate" : ' + conversionRate + ' }');
+            req.setHeader('Authorization', 'OAuth ' + UserInfo.getSessionId());
+            req.setHeader('Content-Type', 'application/json');
+            req.setMethod('POST');
+            
+            // Add the request to the list
+            requests.add(req);
+        }
+        
+        // Send batch HTTP requests
+        Http http = new Http();
+        HTTPResponse[] responses = http.send(requests);
+        
+        // Process the responses
+        for (HttpResponse res : responses) {
+            if (res.getStatusCode() == 201) {
+                System.debug('Currency record updated successfully');
+            } else {
+                System.debug('Failed to update currency record: ' + res.getBody());
+            }
+        }
+    }
+}
